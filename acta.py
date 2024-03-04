@@ -52,7 +52,10 @@ def dados_artigos(self): #(links_artigos): #-> Iterator[tuple[str, str | None]]:
         submetido = dom.find('meta', attrs={"name": "DC.Date.dateSubmitted"}).get("content")
       except:
          submetido='Não disponível'
-      publicado = dom.find('meta', attrs={"name": "DC.Date.created"}).get("content")
+      try:   
+        publicado = dom.find('meta', attrs={"name": "DC.Date.created"}).get("content")
+      except:
+        publicado = 'Não disponível'
       try:
         abstract = dom.find('meta', attrs={"name": "DC.Description"}).get("content")
       except:
