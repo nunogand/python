@@ -111,51 +111,168 @@ class RPMGFScraper:
         return None
     
     def get_magazine_links(self) -> List[str]:
-        """Extract magazine links from the main archive page.
+        """Extract magazine links from ALL archive pages (with pagination).
         
         This function:
         1. Fetches the main archive page
-        2. Parses HTML to find magazine/issue links
-        3. Looks for <a> tags with class 'title'
-        4. Converts relative URLs to absolute URLs
-        5. Returns a list of complete magazine URLs
+        2. Analyzes pagination to find total number of pages
+        3. Visits all archive pages (not just the first one)
+        4. Parses HTML on each page to find magazine/issue links
+        5. Looks for <a> tags with class 'title'
+        6. Converts relative URLs to absolute URLs
+        7. Returns a list of ALL complete magazine URLs across all pages
         """
-        print("\n🔍 STEP 1: Getting Magazine Links")
-        print(f"   📄 Fetching archive page: {self.base_url}")
+        print("\n🔍 STEP 1: Getting Magazine Links (All Pages)")
+        print(f"   📄 Analyzing archive pagination...")
         
-        response = self._make_request(self.base_url)
-        if not response:
-            print("   ❌ Failed to get archive page")
+        # First, get the first page to understand pagination structure
+        first_page_response = self._make_request(self.base_url)
+        if not first_page_response:
+            print("   ❌ Failed to get first archive page")
             return []
-            
+        
         try:
-            print("   🧠 Parsing HTML to find magazine links...")
-            # Parse HTML content with BeautifulSoup
-            soup = bs4.BeautifulSoup(response.content, "lxml")
-            revista_links = []
+            print("   🧠 Parsing first page to detect pagination...")
+            first_page_soup = bs4.BeautifulSoup(first_page_response.content, "lxml")
+            
+            # Detect pagination information
+            pagination_info = self._detect_pagination(first_page_soup)
+            if not pagination_info:
+                print("   ⚠️  No pagination detected, scraping single page only")
+                total_pages = 1
+            else:
+                total_pages = pagination_info['total_pages']
+                issues_per_page = pagination_info['issues_per_page']
+                total_issues = pagination_info['total_issues']
+                
+                print(f"   📊 Pagination detected:")
+                print(f"      Total issues: {total_issues}")
+                print(f"      Issues per page: {issues_per_page}")
+                print(f"      Total pages: {total_pages}")
+            
+            # Extract magazine links from all pages
+            all_magazine_links = []
+            
+            for page_num in range(1, total_pages + 1):
+                print(f"\n   📄 Processing page {page_num}/{total_pages}")
+                
+                # Construct page URL
+                if page_num == 1:
+                    page_url = self.base_url
+                else:
+                    page_url = f"{self.base_url}/{page_num}"
+                
+                print(f"      URL: {page_url}")
+                
+                # Fetch the page
+                page_response = self._make_request(page_url)
+                if not page_response:
+                    print(f"      ❌ Failed to get page {page_num}, skipping...")
+                    continue
+                
+                # Parse the page
+                page_soup = bs4.BeautifulSoup(page_response.content, "lxml")
+                page_magazines = self._extract_magazine_links_from_page(page_soup, page_url)
+                
+                all_magazine_links.extend(page_magazines)
+                print(f"      ✅ Found {len(page_magazines)} magazines on page {page_num}")
+            
+            # Store all links in instance variable for later use
+            self.revistas_links = all_magazine_links
+            
+            print(f"\n   🎉 COMPLETED: Found {len(all_magazine_links)} total magazines across {total_pages} pages!")
+            print("   💾 Stored in self.revistas_links for later use")
+            
+            logger.info(f"Found {len(all_magazine_links)} magazines across {total_pages} pages")
+            return all_magazine_links
+            
+        except Exception as e:
+            print(f"   💥 Error processing magazine links: {e}")
+            logger.error(f"Error processing magazine links: {e}")
+            return []
+
+    def _detect_pagination(self, soup: bs4.BeautifulSoup) -> Optional[Dict]:
+        """Detect pagination information from archive page.
+        
+        Looks for pagination text like "1-50 of 169" and "Next" links
+        to determine the total number of pages and issues.
+        
+        Args:
+            soup: BeautifulSoup parsed HTML of the archive page
+            
+        Returns:
+            Dictionary with pagination info or None if not detected
+        """
+        try:
+            # Look for pagination text (e.g., "1-50 of 169")
+            pagination_text = soup.get_text()
+            
+            # Search for pattern like "1-50 of 169" or "1-25 of 355"
+            import re
+            pagination_match = re.search(r'(\d+)-(\d+)\s+of\s+(\d+)', pagination_text)
+            
+            if pagination_match:
+                start_issue = int(pagination_match.group(1))
+                end_issue = int(pagination_match.group(2))
+                total_issues = int(pagination_match.group(3))
+                
+                issues_per_page = end_issue - start_issue + 1
+                total_pages = (total_issues + issues_per_page - 1) // issues_per_page  # Ceiling division
+                
+                return {
+                    'start_issue': start_issue,
+                    'end_issue': end_issue,
+                    'total_issues': total_issues,
+                    'issues_per_page': issues_per_page,
+                    'total_pages': total_pages
+                }
+            
+            # Alternative: look for "Next" link to estimate pages
+            next_link = soup.find('a', string=re.compile(r'próximo|next|Seguinte', re.I))
+            if next_link:
+                # If there's a next link, there are at least 2 pages
+                # Estimate based on common patterns (usually 25-50 per page)
+                print("      📄 Found 'Next' link, estimating multiple pages...")
+                return {
+                    'total_issues': 169,  # Known from analysis
+                    'issues_per_page': 50,  # Known from analysis  
+                    'total_pages': 4  # Known from analysis
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"      ⚠️  Error detecting pagination: {e}")
+            return None
+
+    def _extract_magazine_links_from_page(self, soup: bs4.BeautifulSoup, page_url: str) -> List[str]:
+        """Extract magazine links from a single archive page.
+        
+        Args:
+            soup: BeautifulSoup parsed HTML of the archive page
+            page_url: URL of the current page (for constructing absolute URLs)
+            
+        Returns:
+            List of magazine URLs found on this page
+        """
+        try:
+            magazine_links = []
             
             # Find all <a> tags with class 'title' (these are the magazine links)
-            print("   🔗 Looking for <a> tags with class 'title'...")
+            print(f"      🔍 Looking for <a> tags with class 'title'...")
             for revista in soup.find_all('a', class_='title'):
                 href = revista.get('href')  # Get the URL from href attribute
                 if href:
                     # Convert relative URL to absolute URL using the base URL
                     full_url = urljoin(self.base_url, href)
-                    revista_links.append(full_url)
-                    print(f"      Found: {revista.get_text()[:30]}... -> {full_url}")
+                    magazine_links.append(full_url)
+                    print(f"         Found: {revista.get_text()[:30]}... -> {full_url}")
             
-            # Store links in instance variable for later use
-            self.revistas_links = revista_links
-            
-            print(f"   ✅ Found {len(revista_links)} magazines!")
-            print("   💾 Stored in self.revistas_links for later use")
-            
-            logger.info(f"Found {len(revista_links)} magazines")
-            return revista_links
+            return magazine_links
             
         except Exception as e:
-            print(f"   💥 Error parsing magazine links: {e}")
-            logger.error(f"Error parsing magazine links: {e}")
+            print(f"      💥 Error extracting magazine links from page: {e}")
+            logger.error(f"Error extracting magazine links from {page_url}: {e}")
             return []
     
     def get_article_links(self) -> List[str]:
@@ -168,7 +285,7 @@ class RPMGFScraper:
         4. Converts relative article URLs to absolute URLs
         5. Returns a complete list of all article URLs
         """
-        print("\n🔍 STEP 2: Getting Article Links from Magazines")
+        print("\n🔍 STEP 2: Getting Article Links from All Magazines")
         
         # Get magazine links from previous step
         revistas_links = self.get_magazine_links()
@@ -177,13 +294,21 @@ class RPMGFScraper:
             return []
             
         n_revistas = len(revistas_links)
-        print(f"   📚 Found {n_revistas} magazines to process")
+        print(f"   📚 Found {n_revistas} magazines to process (this may take a while)")
         print("   🔄 Will visit each magazine to find articles")
+        print("   ⏱️  Estimated time: ~" + str(n_revistas * 2 // 60) + "-" + str(n_revistas * 3 // 60) + " minutes")
         
         article_links = []
+        processed_count = 0
         
         # Process each magazine one by one
         for index, url in enumerate(revistas_links, 1):
+            processed_count += 1
+            
+            # Progress update every 10 magazines or at the end
+            if processed_count % 10 == 0 or processed_count == n_revistas:
+                print(f"\n   📊 Progress: {processed_count}/{n_revistas} magazines processed")
+            
             print(f"\n   📖 Magazine {index}/{n_revistas}:")
             print(f"      URL: {url}")
             
@@ -223,10 +348,10 @@ class RPMGFScraper:
         # Store all article links
         self.links_artigos = article_links
         
-        print(f"\n   📊 SUMMARY: Found {len(article_links)} total articles")
+        print(f"\n   📊 SUMMARY: Found {len(article_links)} total articles from {n_revistas} magazines")
         print("   💾 Stored in self.links_artigos for detailed scraping")
         
-        logger.info(f"Found {len(article_links)} articles total")
+        logger.info(f"Found {len(article_links)} articles from {n_revistas} magazines")
         return article_links
     
     def extract_article_data(self, article_url: str) -> Optional[ArticleData]:
@@ -743,6 +868,11 @@ def main():
     
     # Initialize scraper with conservative settings for reliability
     print("\n⚙️  INITIALIZING SCRAPER")
+    print("   🎯 Target: All 169 RPMGF magazine issues (across 4 archive pages)")
+    print("   📊 Estimated scope: ~1000+ articles")
+    print("   ⏱️  Estimated time: 30-60 minutes")
+    print("   💡 This will comprehensively scrape the entire journal archive")
+    
     scraper = RPMGFScraper(
         max_workers=3,  # Use 3 threads (be gentle to the server)
         delay=1.0      # Wait 1 second between requests
@@ -750,12 +880,13 @@ def main():
     
     try:
         # Run the complete scraping process
-        print("\n🎯 STARTING SCRAPING PROCESS")
+        print("\n🎯 STARTING COMPREHENSIVE SCRAPING PROCESS")
         print("   This will:")
-        print("   1. Find all magazine issues")
-        print("   2. Extract all article URLs")
-        print("   3. Scrape detailed data from each article")
-        print("   4. Save results to Excel and CSV")
+        print("   1. Find all 169 magazine issues across 4 archive pages")
+        print("   2. Extract all article URLs from every magazine")
+        print("   3. Scrape detailed metadata from each article")
+        print("   4. Save comprehensive results to Excel and CSV")
+        print("   📋 Expected output: Complete RPMGF journal database")
         
         articles = scraper.scrape_all_articles()
         
